@@ -26,6 +26,7 @@ user symlinked it into `~/bin`).
 spotify-dl [options] <spotify-url|spotify:uri> [more links...]
 
 -o DIR       output directory (default: ~/Music/spotify-dl, or $SPOTIFY_DL_DIR)
+-j N         tracks to download in parallel (default: 4, 1 = one at a time)
 -n N         YouTube candidates to weigh per track (default: 5)
 -C BROWSER   take cookies from a browser (chrome, safari, firefox...)
 -f           re-download even if the MP3 already exists
@@ -36,6 +37,18 @@ spotify-dl [options] <spotify-url|spotify:uri> [more links...]
 Accepts track, album, and playlist links, several at once. `?si=...` suffixes
 are fine. Files land as `Artist - Title.mp3`; tracks already present are
 skipped unless `-f` is given.
+
+## Parallelism
+
+Four tracks are fetched at once by default. Raise it with `-j 8` for a long
+playlist on a fast connection, or drop to `-j 1` when you want per-track
+progress bars or YouTube is rate-limiting. Much past `-j 8` invites the "confirm
+you're not a bot" check.
+
+A parallel run prints one line per finished track and ends with a summary
+(downloaded / already had / failed, with each failure named). Completed files
+are skipped on a re-run, so an interrupted or cancelled batch resumes where it
+stopped — just run the same command again.
 
 ## How to run it
 

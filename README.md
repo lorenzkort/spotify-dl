@@ -37,6 +37,7 @@ ln -s "$PWD/spotify-dl/bin/spotify-dl" ~/bin/spotify-dl
 spotify-dl https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT
 spotify-dl -o ~/Music/mixes https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
 spotify-dl -d <link>              # dry run: list the tracks, download nothing
+spotify-dl -j 8 <link>            # more tracks at once (8 parallel downloads)
 spotify-dl -C chrome <link>       # use browser cookies if YouTube does a bot check
 spotify-dl -f <link>              # re-download over existing files
 ```
@@ -44,6 +45,7 @@ spotify-dl -f <link>              # re-download over existing files
 | Option | Meaning |
 | --- | --- |
 | `-o DIR` | output directory (default `~/Music/spotify-dl`, or `$SPOTIFY_DL_DIR`) |
+| `-j N` | tracks to download in parallel (default 4, `1` = one at a time) |
 | `-n N` | YouTube candidates to weigh per track (default 5) |
 | `-C BROWSER` | pass cookies from `chrome`, `safari`, `firefox`, ... to yt-dlp |
 | `-f` | re-download even if the MP3 exists |
@@ -53,6 +55,24 @@ spotify-dl -f <link>              # re-download over existing files
 Track, album, and playlist links all work, several at a time, as
 `https://open.spotify.com/...` URLs or `spotify:...` URIs. Files are named
 `Artist - Title.mp3`; existing files are skipped unless `-f` is passed.
+
+## Parallel downloads
+
+By default four tracks are fetched at once; `-j N` changes that and `-j 1` goes
+back to one at a time. Each track is an independent YouTube search, download,
+MP3 conversion and tagging pass, so this scales close to linearly until the
+network or the CPU saturates.
+
+Two things to know:
+
+- Progress bars are only shown with `-j 1`. Several at once are unreadable, so
+  parallel runs print one line per finished track instead.
+- Going much past `-j 8` makes YouTube rate-limiting ("confirm you're not a
+  bot") more likely. If that happens, lower `-j` or pass `-C <browser>`.
+
+A run ends with a summary of how many tracks were downloaded, already present,
+and failed, naming each failure. Finished files are skipped on a re-run, so an
+interrupted batch resumes where it stopped.
 
 ## How a match is picked
 

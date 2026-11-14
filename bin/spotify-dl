@@ -10,6 +10,7 @@
 #
 # Options:
 #   -o DIR        output directory (default: ~/Music/spotify-dl)
+#   -j N          tracks to download in parallel (default: 4, 1 = one at a time)
 #   -n N          YouTube candidates to weigh per track (default: 5)
 #   -C BROWSER    take cookies from a browser (chrome, safari, firefox...);
 #                 use if YouTube asks to "confirm you're not a bot"
@@ -19,32 +20,52 @@
 #
 # Requires: yt-dlp, ffmpeg, jq, curl   ->   brew install yt-dlp ffmpeg jq
 
-set -euo pipefail
+set -uo pipefail
+
+UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 
 OUTDIR="${SPOTIFY_DL_DIR:-$HOME/Music/spotify-dl}"
-CANDIDATES=5
-COOKIES_BROWSER=""
-FORCE=0
+CANDIDATES="${SDL_CANDIDATES:-5}"
+COOKIES_BROWSER="${SDL_COOKIES:-}"
+FORCE="${SDL_FORCE:-0}"
+JOBS="${SDL_JOBS:-4}"
 DRYRUN=0
-UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 
 usage() { sed -n '/^# Usage:/,/^# Requires:/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "error: $*" >&2; exit 1; }
 log() { printf '%s\n' "$*" >&2; }
 
-while getopts ":o:n:C:fdh" opt; do
-  case "$opt" in
-    o) OUTDIR="$OPTARG" ;;
-    n) CANDIDATES="$OPTARG" ;;
-    C) COOKIES_BROWSER="$OPTARG" ;;
-    f) FORCE=1 ;;
-    d) DRYRUN=1 ;;
-    h) usage 0 ;;
-    *) usage 1 ;;
-  esac
-done
-shift $((OPTIND - 1))
-[ $# -ge 1 ] || usage 1
+# Absolute path to this script, so a parallel run can re-invoke itself.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELF="$SELF_DIR/$(basename "$0")"
+
+# Is this a worker invocation for one track? (internal, set up by the driver)
+CHILD=0
+if [ "${1:-}" = "--track-record" ]; then
+  CHILD=1
+  RECORD="${2:-}"
+  shift 2
+fi
+
+if [ "$CHILD" -eq 0 ]; then
+  while getopts ":o:j:n:C:fdh" opt; do
+    case "$opt" in
+      o) OUTDIR="$OPTARG" ;;
+      j) JOBS="$OPTARG" ;;
+      n) CANDIDATES="$OPTARG" ;;
+      C) COOKIES_BROWSER="$OPTARG" ;;
+      f) FORCE=1 ;;
+      d) DRYRUN=1 ;;
+      h) usage 0 ;;
+      *) usage 1 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+  [ $# -ge 1 ] || usage 1
+fi
+
+case "$JOBS" in ''|*[!0-9]*) die "-j takes a number" ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=1
 
 for cmd in curl jq yt-dlp ffmpeg; do
   command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found — install with: brew install yt-dlp ffmpeg jq"
@@ -53,7 +74,11 @@ done
 COOKIE_ARGS=""
 [ -n "$COOKIES_BROWSER" ] && COOKIE_ARGS="--cookies-from-browser $COOKIES_BROWSER"
 
-mkdir -p "$OUTDIR"
+mkdir -p "$OUTDIR" || die "cannot write to $OUTDIR"
+
+# All scratch space lives under one root, cleaned up even on Ctrl-C or kill.
+TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/spotify-dl.XXXXXX")"
+trap 'rm -rf "$TMPROOT"' EXIT HUP INT TERM
 
 # ---------------------------------------------------------------- spotify side
 
@@ -117,40 +142,55 @@ pick_video() {
     | sort_by(.score) | .[0].id // empty'
 }
 
+# Record the outcome of one track for the closing summary. A single short
+# append is atomic enough for parallel workers.
+note_result() {
+  [ -n "${SDL_RESULTS:-}" ] || return 0
+  printf '%s\t%s\n' "$1" "$2" >> "$SDL_RESULTS" 2>/dev/null || true
+}
+
 download_track() {
   local title="$1" artist="$2" album="$3" dur_ms="$4" uri="$5" cover="$6"
-  local base out tmp vid thumb query
+  local base out tmp vid thumb query rc
   base="$(sanitize "$artist - $title")"
   out="$OUTDIR/$base.mp3"
   query="$artist $title"
 
   if [ -f "$out" ] && [ "$FORCE" -eq 0 ]; then
-    log "    = skip, already there: $base.mp3"
+    log "  = have it: $base.mp3"
+    note_result SKIP "$base"
     return 0
   fi
   if [ "$DRYRUN" -eq 1 ]; then
-    log "    ~ would search \"$query\" (${dur_ms}ms) -> $out"
+    log "  ~ would search \"$query\" (${dur_ms}ms) -> $out"
     return 0
   fi
 
-  vid="$(pick_video "$query" "$dur_ms" "$(printf '%s' "$title" | tr 'A-Z' 'a-z')" || true)"
+  vid="$(pick_video "$query" "$dur_ms" "$(printf '%s' "$title" | tr 'A-Z' 'a-z')")"
   if [ -z "${vid:-}" ]; then
-    log "    ! no YouTube match for \"$query\""
+    log "  ! no YouTube match: $base"
+    note_result FAIL "$base (no match)"
     return 1
   fi
 
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/spotify-dl.XXXXXX")"
-  trap 'rm -rf "$tmp"' RETURN
+  tmp="$(mktemp -d "$TMPROOT/track.XXXXXX")" || return 1
 
-  log "    > youtu.be/$vid"
-  if ! yt-dlp $COOKIE_ARGS --ignore-config --no-playlist --no-warnings --quiet --progress \
-        -f "bestaudio/best" -x --audio-format mp3 --audio-quality 0 \
-        --write-thumbnail --convert-thumbnails jpg \
-        -o "$tmp/audio.%(ext)s" "https://www.youtube.com/watch?v=$vid"; then
-    log "    ! download failed for \"$query\""
+  # Progress bars from several workers at once are unreadable, so they are only
+  # shown when downloading one track at a time.
+  local prog="--no-progress"
+  [ "$JOBS" -eq 1 ] && prog="--progress"
+
+  yt-dlp $COOKIE_ARGS --ignore-config --no-playlist --no-warnings --quiet $prog \
+      -f "bestaudio/best" -x --audio-format mp3 --audio-quality 0 \
+      --write-thumbnail --convert-thumbnails jpg \
+      -o "$tmp/audio.%(ext)s" "https://www.youtube.com/watch?v=$vid"
+  rc=$?
+  if [ $rc -ne 0 ] || [ ! -f "$tmp/audio.mp3" ]; then
+    log "  ! download failed: $base (youtu.be/$vid)"
+    note_result FAIL "$base (download failed)"
+    rm -rf "$tmp"
     return 1
   fi
-  [ -f "$tmp/audio.mp3" ] || { log "    ! no audio produced for \"$query\""; return 1; }
 
   # Cover art: Spotify's own, falling back to the YouTube thumbnail.
   thumb=""
@@ -175,25 +215,54 @@ download_track() {
 
   if "${ff[@]}" && [ -s "$tmp/tagged.mp3" ]; then
     mv -f "$tmp/tagged.mp3" "$out"
+    log "  OK $base"
+    note_result OK "$base"
   else
     mv -f "$tmp/audio.mp3" "$out"   # keep the audio even if tagging failed
-    log "    ! tagging failed, saved untagged"
+    log "  OK $base (untagged — ffmpeg tagging failed)"
+    note_result OK "$base (untagged)"
   fi
-  log "    OK  $out"
+  rm -rf "$tmp"
 }
+
+# ------------------------------------------------- worker: one track, one call
+
+if [ "$CHILD" -eq 1 ]; then
+  IFS=$'\t' read -r w_title w_artist w_dur w_uri <<WORKER
+$RECORD
+WORKER
+  [ -n "${w_title:-}" ] || exit 0
+  download_track "$w_title" "$w_artist" "${SDL_ALBUM:-$w_title}" \
+                 "${w_dur:-0}" "${w_uri:-}" "${SDL_COVER:-}"
+  exit $?
+fi
 
 # --------------------------------------------------------------------- driver
 
-for link in "$@"; do
-  ref="$(parse_spotify "$link" || true)"
-  [ -n "$ref" ] || { log "not a Spotify track/album/playlist link, skipping: $link"; continue; }
+RESULTS="$TMPROOT/results"
+: > "$RESULTS"
+export SDL_RESULTS="$RESULTS"
+export SPOTIFY_DL_DIR="$OUTDIR"
+export SDL_CANDIDATES="$CANDIDATES"
+export SDL_COOKIES="$COOKIES_BROWSER"
+export SDL_FORCE="$FORCE"
+export SDL_JOBS="$JOBS"
 
-  json="$(fetch_entity "$ref" || true)"
-  [ -n "$json" ] || { log "could not read Spotify metadata for $ref"; continue; }
+for link in "$@"; do
+  ref="$(parse_spotify "$link")"
+  if [ -z "$ref" ]; then
+    log "not a Spotify track/album/playlist link, skipping: $link"
+    continue
+  fi
+
+  json="$(fetch_entity "$ref")"
+  if [ -z "$json" ]; then
+    log "could not read Spotify metadata for $ref"
+    continue
+  fi
 
   kind="${ref%%/*}"
   name="$(printf '%s' "$json" | jq -r '.props.pageProps.state.data.entity.name // empty')"
-  log "$kind: ${name:-unknown}"
 
   cover="$(printf '%s' "$json" | jq -r '
     (.props.pageProps.state.data.entity.visualIdentity.image // [])
@@ -227,16 +296,49 @@ for link in "$@"; do
         (.uri // "") ]
     | @tsv')"
 
-  [ -n "$rows" ] || { log "no tracks found for $ref"; continue; }
+  if [ -z "$rows" ]; then
+    log "no tracks found for $ref"
+    continue
+  fi
 
-  while IFS=$'\t' read -r t a d u; do
-    [ -n "${t:-}" ] || continue
-    log "  - $a - $t"
-    download_track "$t" "$a" "${album_name:-$t}" "${d:-0}" "${u:-}" "$cover" || true
-  done <<ROWS
+  count="$(printf '%s\n' "$rows" | grep -c .)"
+  if [ "$JOBS" -gt 1 ] && [ "$DRYRUN" -eq 0 ]; then
+    log "$kind: ${name:-unknown} — $count tracks, $JOBS at a time"
+  else
+    log "$kind: ${name:-unknown} — $count tracks"
+  fi
+
+  export SDL_ALBUM="$album_name"
+  export SDL_COVER="$cover"
+
+  if [ "$JOBS" -gt 1 ] && [ "$DRYRUN" -eq 0 ]; then
+    # One worker process per track, $JOBS running at once.
+    printf '%s' "$rows" | tr '\n' '\0' |
+      xargs -0 -n 1 -P "$JOBS" "$SELF" --track-record
+  else
+    while IFS=$'\t' read -r t a d u; do
+      [ -n "${t:-}" ] || continue
+      log "- $a - $t"
+      download_track "$t" "$a" "${album_name:-$t}" "${d:-0}" "${u:-}" "$cover"
+    done <<ROWS
 $rows
 ROWS
+  fi
 done
 
-log ""
-log "done -> $OUTDIR"
+# ------------------------------------------------------------------- summary
+
+if [ "$DRYRUN" -eq 0 ]; then
+  n_ok="$(grep -c '^OK' "$RESULTS" 2>/dev/null)"
+  n_skip="$(grep -c '^SKIP' "$RESULTS" 2>/dev/null)"
+  n_fail="$(grep -c '^FAIL' "$RESULTS" 2>/dev/null)"
+  log ""
+  log "downloaded $n_ok, already had $n_skip, failed $n_fail -> $OUTDIR"
+  if [ "${n_fail:-0}" -gt 0 ]; then
+    log "failed:"
+    grep '^FAIL' "$RESULTS" | cut -f2- | sed 's/^/  - /' >&2
+  fi
+else
+  log ""
+  log "dry run only -> nothing downloaded"
+fi
