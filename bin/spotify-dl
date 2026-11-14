@@ -15,6 +15,7 @@
 #   -S SECS       sleep between requests, with jitter (default: 0)
 #   -L RATE       cap download speed, e.g. 2M (default: no cap)
 #   -x PROXY      send all traffic through a proxy, e.g. socks5://127.0.0.1:1080
+#   -k FILE       cookies.txt file (no keychain prompt, unlike -C)
 #   -C BROWSER    take cookies from a browser (chrome, safari, firefox...);
 #                 ties the download to that account — see the note below
 #   -f            re-download even if the MP3 already exists
@@ -41,6 +42,7 @@ UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, l
 OUTDIR="${SPOTIFY_DL_DIR:-$HOME/Music/spotify-dl}"
 CANDIDATES="${SDL_CANDIDATES:-5}"
 COOKIES_BROWSER="${SDL_COOKIES:-}"
+COOKIES_FILE="${SDL_COOKIEFILE:-}"
 FORCE="${SDL_FORCE:-0}"
 JOBS="${SDL_JOBS:-4}"
 SLEEP_REQ="${SDL_SLEEP:-0}"
@@ -76,7 +78,7 @@ done
 set -- ${ARGV+"${ARGV[@]}"}
 
 if [ "$CHILD" -eq 0 ]; then
-  while getopts ":o:j:n:S:L:x:C:fdh" opt; do
+  while getopts ":o:j:n:S:L:x:C:k:fdh" opt; do
     case "$opt" in
       o) OUTDIR="$OPTARG" ;;
       j) JOBS="$OPTARG" ;;
@@ -85,6 +87,7 @@ if [ "$CHILD" -eq 0 ]; then
       L) RATE="$OPTARG" ;;
       x) PROXY="$OPTARG" ;;
       C) COOKIES_BROWSER="$OPTARG" ;;
+      k) COOKIES_FILE="$OPTARG" ;;
       f) FORCE=1 ;;
       d) DRYRUN=1 ;;
       h) usage 0 ;;
@@ -141,6 +144,7 @@ net_args() {
   local a=""
   [ -n "$PROXY" ] && a="$a --proxy $PROXY"
   [ -n "$COOKIES_BROWSER" ] && a="$a --cookies-from-browser $COOKIES_BROWSER"
+  [ -n "$COOKIES_FILE" ] && a="$a --cookies $COOKIES_FILE"
   printf '%s' "$a"
 }
 
@@ -366,6 +370,7 @@ export SDL_RESULTS="$RESULTS"
 export SPOTIFY_DL_DIR="$OUTDIR"
 export SDL_CANDIDATES="$CANDIDATES"
 export SDL_COOKIES="$COOKIES_BROWSER"
+export SDL_COOKIEFILE="$COOKIES_FILE"
 export SDL_FORCE="$FORCE"
 export SDL_JOBS="$JOBS"
 export SDL_SLEEP="$SLEEP_REQ"

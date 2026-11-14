@@ -78,15 +78,34 @@ What to do with that:
 
 ## Rate limiting
 
-If downloads start failing with "Sign in to confirm you're not a bot", the IP is
-being rate-limited. In order: lower `-j`, add `-S 2` (sleeps with jitter), cap
-with `-L 2M`, or switch VPN endpoint. It usually clears on its own.
+If downloads start failing with "Sign in to confirm you're not a bot", the IP
+is being rate-limited. In order: lower `-j`, add `-S 2` (sleeps with jitter),
+cap with `-L 2M`, or switch VPN endpoint. It usually clears on its own.
 
-Reach for `-C <browser>` last and say why: it sends the user's logged-in
-cookies, which attaches automated downloading to their account rather than just
-an IP, and an account can be actioned where an IP is only throttled. Never pass
-it without the user asking.
+### Never pass `-C` on your own
 
+`-C <browser>` makes yt-dlp read the browser's cookie database. On macOS those
+cookies are encrypted with the login keychain, so the run **stops dead behind a
+system password prompt** ("security wants to use your confidential information
+stored in Chrome Safe Storage"). The user has to type their Mac login password
+before anything continues — in an unattended or background run it just hangs.
+
+It also attaches automated downloading to their logged-in account rather than
+to an IP, and an account can be actioned where an IP is only throttled.
+
+So: do not pass `-C` to get past a bot check, do not suggest it as the first
+fix, and never add it to a batch the user is not watching. The normal path —
+no cookies at all — needs no keychain, no browser, and no password.
+
+If the user explicitly asks for cookies, warn about the prompt first, and
+prefer `-k FILE` with an exported cookies.txt (one prompt when exporting,
+none afterwards) over `-C`.
+
+## Invoke it by full path
+
+`spotify-dl` is often not on `PATH` in a fresh shell, which shows up as
+`command not found: spotify-dl`. Use `${CLAUDE_PLUGIN_ROOT}/bin/spotify-dl`,
+or `~/bin/spotify-dl` if the user symlinked it there.
 ## How to run it
 
 1. **Check dependencies once.** The script needs `yt-dlp`, `ffmpeg`, `jq`, and
