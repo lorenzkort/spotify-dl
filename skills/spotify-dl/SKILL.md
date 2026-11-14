@@ -31,7 +31,7 @@ spotify-dl [options] <spotify-url|spotify:uri> [more links...]
 -S SECS      sleep between requests, with jitter (default: 0)
 -L RATE      cap download speed, e.g. 2M
 -x PROXY     send traffic through a proxy, e.g. socks5://127.0.0.1:1080
---no-vpn     download over the plain connection (do not pass this yourself)
+--require-vpn  refuse to download unless a VPN or proxy is in use
 -C BROWSER   take cookies from a browser (chrome, safari, firefox...)
 -f           re-download even if the MP3 already exists
 -d           dry run: list what it would fetch, download nothing
@@ -53,24 +53,28 @@ A parallel run prints one line per finished track and ends with a summary
 (downloaded / already had / failed, with each failure named). Completed files
 are skipped on a re-run, so an interrupted or cancelled batch resumes where it
 stopped — just run the same command again.
-## VPN is required by default
 
-The script refuses to download unless the default route leaves through a
-tunnel (`utun*`, `ipsec*`, `ppp*`, `tun*`, `gpd*`), or `-x` names a proxy. It
-exits 2 with a list of the VPN profiles configured on the machine.
+## Advise a VPN, don't insist on one
 
-**Do not pass `--no-vpn` to work around this.** If the guard trips, tell the
-user their VPN is disconnected and let them decide: connect it and re-run, or
-explicitly ask for `--no-vpn`. The script cannot establish a connection itself,
-because a VPN client's credentials live in its own app; `scutil --nc start
-"<name>"` works only for profiles macOS can bring up unaided, and silently
-falls back to Disconnected otherwise.
+A VPN is recommended, not required. The script prints a notice when traffic is
+leaving under the user's own address and then carries on.
 
-Each track re-checks, so a tunnel that drops mid-batch stops the remaining
-tracks rather than leaking the user's own IP. The summary says so, and a re-run
-finishes the rest.
+What to do with that:
 
-`-d` (dry run) only reads Spotify metadata, so it works with no tunnel.
+- Before a long batch (an album or playlist rather than a single track),
+  mention that a VPN is worth connecting, and say whether one is currently in
+  use — `route -n get default` shows the interface, and a tunnel looks like
+  `utun4` rather than `en0`. Then let the user decide and proceed either way.
+- Do not connect, disconnect, or reconfigure a VPN on your own. Credentials
+  live in the client's app, `scutil --nc start "<name>"` silently falls back to
+  Disconnected for app-managed profiles like ProtonVPN, and changing someone's
+  network state is theirs to choose.
+- Pass `--require-vpn` only if the user asks for it. Under that flag the check
+  runs per track, so a tunnel that drops mid-batch stops the rest instead of
+  leaking the user's IP, and a re-run finishes what's left.
+- `-x PROXY` is the other way to satisfy it, if the user has a proxy.
+
+`-d` (dry run) reads only Spotify metadata, so none of this applies to it.
 
 ## Rate limiting
 

@@ -50,7 +50,7 @@ spotify-dl -f <link>              # re-download over existing files
 | `-S SECS` | sleep between requests, with jitter (default 0) |
 | `-L RATE` | cap download speed, e.g. `2M` |
 | `-x PROXY` | send traffic through a proxy, e.g. `socks5://127.0.0.1:1080` |
-| `--no-vpn` | download over the plain connection (see below) |
+| `--require-vpn` | refuse to download unless a VPN or proxy is in use |
 | `-C BROWSER` | pass cookies from `chrome`, `safari`, `firefox`, ... to yt-dlp |
 | `-f` | re-download even if the MP3 exists |
 | `-d` | dry run |
@@ -80,31 +80,25 @@ interrupted batch resumes where it stopped.
 
 ## VPN
 
-By default **nothing is downloaded unless traffic leaves through a tunnel**.
-The check is the interface of the default route: `utun*`, `ipsec*`, `ppp*`,
-`tun*` and `gpd*` count as a tunnel, anything else (`en0`, `bridge0`) does not.
-Naming a proxy with `-x` also satisfies it, since that traffic egresses there.
-
-Without one, the run stops before any request is made and prints the VPN
-profiles configured on the machine:
+A VPN is recommended, not required. When the default route does not leave
+through a tunnel (`utun*`, `ipsec*`, `ppp*`, `tun*`, `gpd*`) and `-x` names no
+proxy, the run says so and carries on under your own address:
 
 ```
-No VPN: the default route leaves through en0.
-  Connect one and re-run, or pass --no-vpn to accept your own IP.
-  Configured here:
-    - ProtonVPN
+Note: no VPN — traffic leaves through en0, under your own address.
+      Worth connecting one for a long batch. --require-vpn refuses without it.
 ```
 
-Every track re-checks, so if the tunnel drops mid-batch the remaining tracks
-stop instead of quietly falling back to your own address — a kill switch rather
-than a one-time check at startup. Reconnect and run the same command to finish;
-completed files are skipped.
+`--require-vpn` turns the notice into a refusal, exits 2, and lists the VPN
+profiles configured on the machine. Under that flag the check runs per track,
+so a tunnel dropping mid-batch stops the rest rather than falling back to your
+own IP; reconnect and re-run to finish, since completed files are skipped.
 
 The script cannot *establish* a connection — a VPN client's credentials live in
-its own app. Connect there (or `scutil --nc start "<name>"` for a profile macOS
-can bring up unaided), then run the download. `--no-vpn` opts out entirely.
+its own app, and `scutil --nc start "<name>"` only works for profiles macOS can
+bring up unaided. Connect in the app, then download.
 
-`-d` (dry run) reads only Spotify metadata, so it works without a tunnel.
+`-d` (dry run) reads only Spotify metadata, so the notice never applies.
 
 ## Being polite to YouTube
 

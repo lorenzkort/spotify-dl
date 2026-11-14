@@ -19,13 +19,14 @@
 #                 ties the download to that account — see the note below
 #   -f            re-download even if the MP3 already exists
 #   -d            dry run: list what it would fetch, download nothing
-#   --no-vpn      download over the plain connection (see VPN, below)
+#   --require-vpn refuse to download unless a VPN/proxy is in use
 #   -h            show this help
 #
-# VPN: by default nothing is downloaded unless the default route leaves through
-# a tunnel (utun/ipsec/ppp/tun) or -x names a proxy. Every track re-checks, so
-# if the tunnel drops mid-batch the remaining tracks stop instead of falling
-# back to your own IP. Pass --no-vpn to download without one.
+# VPN: a VPN is recommended but not required. When the default route does not
+# leave through a tunnel (utun/ipsec/ppp/tun) and -x names no proxy, the run
+# says so and continues under your own address. --require-vpn turns that into
+# a refusal instead, re-checked per track so a tunnel dropping mid-batch stops
+# the rest rather than falling back to your own IP.
 #
 # Cookies: -C ties requests to that browser's logged-in account. It clears a
 # YouTube bot check, but it also attaches automated downloading to your
@@ -45,7 +46,7 @@ JOBS="${SDL_JOBS:-4}"
 SLEEP_REQ="${SDL_SLEEP:-0}"
 RATE="${SDL_RATE:-}"
 PROXY="${SDL_PROXY:-}"
-REQUIRE_VPN="${SDL_REQUIRE_VPN:-1}"
+REQUIRE_VPN="${SDL_REQUIRE_VPN:-0}"
 DRYRUN=0
 
 usage() { sed -n '/^# Usage:/,/^# Requires:/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
@@ -63,10 +64,14 @@ if [ "${1:-}" = "--track-record" ]; then
   shift 2
 fi
 
-# getopts has no long options, so --no-vpn is filtered out before it runs.
+# getopts has no long options, so --require-vpn is filtered out before it runs.
 ARGV=()
 for a in "$@"; do
-  if [ "$a" = "--no-vpn" ]; then REQUIRE_VPN=0; else ARGV+=("$a"); fi
+  case "$a" in
+    --require-vpn) REQUIRE_VPN=1 ;;
+    --no-vpn) ;;   # accepted and ignored: advisory is the default now
+    *) ARGV+=("$a") ;;
+  esac
 done
 set -- ${ARGV+"${ARGV[@]}"}
 
@@ -123,7 +128,7 @@ vpn_hint() {
   # Note: no `| grep -q` here — under `set -o pipefail` the upstream command
   # is killed by SIGPIPE and the pipeline reports failure even on a match.
   names="$(scutil --nc list 2>/dev/null | sed -n 's/.*"\(.*\)".*\[VPN.*/    - \1/p')"
-  log "  Connect one and re-run, or pass --no-vpn to accept your own IP."
+  log "  Connect one and re-run, or drop --require-vpn to go without."
   if [ -n "$names" ]; then
     log "  Configured here:"
     printf '%s\n' "$names" >&2
@@ -334,20 +339,24 @@ fi
 
 # --------------------------------------------------------------------- driver
 
-if [ "$DRYRUN" -eq 0 ] && [ "$REQUIRE_VPN" -eq 1 ] && ! tunnel_active; then
-  log "No VPN: the default route leaves through $(route_iface)."
-  vpn_hint
-  exit 2
+if [ "$DRYRUN" -eq 0 ] && ! tunnel_active; then
+  if [ "$REQUIRE_VPN" -eq 1 ]; then
+    log "No VPN: the default route leaves through $(route_iface)."
+    vpn_hint
+    exit 2
+  fi
+  log "Note: no VPN — traffic leaves through $(route_iface), under your own address."
+  log "      Worth connecting one for a long batch. --require-vpn refuses without it."
 fi
 
 if [ "$DRYRUN" -eq 0 ]; then
   ip="$(egress_ip)"
   if [ -n "$PROXY" ]; then
     log "proxy: $PROXY${ip:+ — traffic appears from $ip}"
-  elif [ "$REQUIRE_VPN" -eq 1 ]; then
+  elif tunnel_active; then
     log "tunnel: $(route_iface)${ip:+ — traffic appears from $ip}"
-  else
-    log "no VPN${ip:+ — traffic appears from $ip (your own address)}"
+  elif [ -n "$ip" ]; then
+    log "      (that address is $ip)"
   fi
 fi
 
