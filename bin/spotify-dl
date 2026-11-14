@@ -116,11 +116,9 @@ sanitize() {
 # Best YouTube match for a track: closest duration wins, official "- Topic"
 # uploads and "official audio" get a bonus, live/cover/karaoke/sped-up versions
 # are penalised unless the Spotify title itself asks for that kind of version.
-pick_video() {
-  local query="$1" want_ms="$2" title_lc="$3" allow_live=0 allow_remix=0
-  case "$title_lc" in *live*) allow_live=1 ;; esac
-  case "$title_lc" in *remix*|*mix*|*version*|*edit*) allow_remix=1 ;; esac
-
+# Score one search query's results and return the winning video id, or nothing.
+search_best() {
+  local query="$1" want_ms="$2" allow_live="$3" allow_remix="$4"
   yt-dlp $COOKIE_ARGS --ignore-config --flat-playlist --dump-json \
          "ytsearch${CANDIDATES}:${query}" 2>/dev/null |
   jq -rs --argjson want "${want_ms:-0}" --argjson allow_live "$allow_live" \
@@ -140,6 +138,25 @@ pick_video() {
           + (if ($allow_remix == 0 and (.t | test("remix|mashup"))) then 80000 else 0 end)
         )})
     | sort_by(.score) | .[0].id // empty'
+}
+
+pick_video() {
+  local title="$1" artist="$2" want_ms="$3" allow_live=0 allow_remix=0
+  local title_lc vid
+  title_lc="$(printf '%s' "$title" | tr 'A-Z' 'a-z')"
+  case "$title_lc" in *live*) allow_live=1 ;; esac
+  case "$title_lc" in *remix*|*mix*|*version*|*edit*) allow_remix=1 ;; esac
+
+  vid="$(search_best "$artist $title" "$want_ms" "$allow_live" "$allow_remix")"
+
+  # A short "artist title" query sometimes comes back completely empty from
+  # YouTube search even though the track is there, so retry reworded before
+  # giving up (e.g. "Rone Nakt" finds nothing, "Nakt Rone audio" finds it).
+  if [ -z "$vid" ]; then
+    vid="$(search_best "$title $artist audio" "$want_ms" "$allow_live" "$allow_remix")"
+  fi
+
+  printf '%s' "$vid"
 }
 
 # Record the outcome of one track for the closing summary. A single short
@@ -166,7 +183,7 @@ download_track() {
     return 0
   fi
 
-  vid="$(pick_video "$query" "$dur_ms" "$(printf '%s' "$title" | tr 'A-Z' 'a-z')")"
+  vid="$(pick_video "$title" "$artist" "$dur_ms")"
   if [ -z "${vid:-}" ]; then
     log "  ! no YouTube match: $base"
     note_result FAIL "$base (no match)"
