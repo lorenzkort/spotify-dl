@@ -12,11 +12,24 @@
 #   -o DIR        output directory (default: ~/Music/spotify-dl)
 #   -j N          tracks to download in parallel (default: 4, 1 = one at a time)
 #   -n N          YouTube candidates to weigh per track (default: 5)
+#   -S SECS       sleep between requests, with jitter (default: 0)
+#   -L RATE       cap download speed, e.g. 2M (default: no cap)
+#   -x PROXY      send all traffic through a proxy, e.g. socks5://127.0.0.1:1080
 #   -C BROWSER    take cookies from a browser (chrome, safari, firefox...);
-#                 use if YouTube asks to "confirm you're not a bot"
+#                 ties the download to that account — see the note below
 #   -f            re-download even if the MP3 already exists
 #   -d            dry run: list what it would fetch, download nothing
+#   --no-vpn      download over the plain connection (see VPN, below)
 #   -h            show this help
+#
+# VPN: by default nothing is downloaded unless the default route leaves through
+# a tunnel (utun/ipsec/ppp/tun) or -x names a proxy. Every track re-checks, so
+# if the tunnel drops mid-batch the remaining tracks stop instead of falling
+# back to your own IP. Pass --no-vpn to download without one.
+#
+# Cookies: -C ties requests to that browser's logged-in account. It clears a
+# YouTube bot check, but it also attaches automated downloading to your
+# account rather than just your IP. Prefer a lower -j and -S first.
 #
 # Requires: yt-dlp, ffmpeg, jq, curl   ->   brew install yt-dlp ffmpeg jq
 
@@ -29,13 +42,16 @@ CANDIDATES="${SDL_CANDIDATES:-5}"
 COOKIES_BROWSER="${SDL_COOKIES:-}"
 FORCE="${SDL_FORCE:-0}"
 JOBS="${SDL_JOBS:-4}"
+SLEEP_REQ="${SDL_SLEEP:-0}"
+RATE="${SDL_RATE:-}"
+PROXY="${SDL_PROXY:-}"
+REQUIRE_VPN="${SDL_REQUIRE_VPN:-1}"
 DRYRUN=0
 
 usage() { sed -n '/^# Usage:/,/^# Requires:/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "error: $*" >&2; exit 1; }
 log() { printf '%s\n' "$*" >&2; }
 
-# Absolute path to this script, so a parallel run can re-invoke itself.
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 SELF="$SELF_DIR/$(basename "$0")"
 
@@ -47,12 +63,22 @@ if [ "${1:-}" = "--track-record" ]; then
   shift 2
 fi
 
+# getopts has no long options, so --no-vpn is filtered out before it runs.
+ARGV=()
+for a in "$@"; do
+  if [ "$a" = "--no-vpn" ]; then REQUIRE_VPN=0; else ARGV+=("$a"); fi
+done
+set -- ${ARGV+"${ARGV[@]}"}
+
 if [ "$CHILD" -eq 0 ]; then
-  while getopts ":o:j:n:C:fdh" opt; do
+  while getopts ":o:j:n:S:L:x:C:fdh" opt; do
     case "$opt" in
       o) OUTDIR="$OPTARG" ;;
       j) JOBS="$OPTARG" ;;
       n) CANDIDATES="$OPTARG" ;;
+      S) SLEEP_REQ="$OPTARG" ;;
+      L) RATE="$OPTARG" ;;
+      x) PROXY="$OPTARG" ;;
       C) COOKIES_BROWSER="$OPTARG" ;;
       f) FORCE=1 ;;
       d) DRYRUN=1 ;;
@@ -66,23 +92,76 @@ fi
 
 case "$JOBS" in ''|*[!0-9]*) die "-j takes a number" ;; esac
 [ "$JOBS" -ge 1 ] || JOBS=1
+case "$SLEEP_REQ" in ''|*[!0-9.]*) die "-S takes seconds, e.g. 2" ;; esac
 
 for cmd in curl jq yt-dlp ffmpeg; do
   command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found — install with: brew install yt-dlp ffmpeg jq"
 done
 
-COOKIE_ARGS=""
-[ -n "$COOKIES_BROWSER" ] && COOKIE_ARGS="--cookies-from-browser $COOKIES_BROWSER"
+# ------------------------------------------------------------------ networking
+
+# Which interface the default route leaves by, e.g. en0 or utun4.
+route_iface() { route -n get default 2>/dev/null | awk '/interface:/{print $2}'; }
+
+# True when traffic leaves through a tunnel, or through a proxy we were given.
+tunnel_active() {
+  [ -n "$PROXY" ] && return 0
+  case "$(route_iface)" in
+    utun*|ipsec*|ppp*|tun*|gpd*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The address the outside world sees. Best effort: never fatal, never cached.
+egress_ip() {
+  curl -fsS --max-time 8 ${PROXY:+--proxy "$PROXY"} \
+       -A "$UA" https://api.ipify.org 2>/dev/null
+}
+
+vpn_hint() {
+  local names
+  # Note: no `| grep -q` here — under `set -o pipefail` the upstream command
+  # is killed by SIGPIPE and the pipeline reports failure even on a match.
+  names="$(scutil --nc list 2>/dev/null | sed -n 's/.*"\(.*\)".*\[VPN.*/    - \1/p')"
+  log "  Connect one and re-run, or pass --no-vpn to accept your own IP."
+  if [ -n "$names" ]; then
+    log "  Configured here:"
+    printf '%s\n' "$names" >&2
+    log "  Start it from the app, or: scutil --nc start \"<name>\""
+  fi
+}
+
+# yt-dlp flags shared by search and download.
+net_args() {
+  local a=""
+  [ -n "$PROXY" ] && a="$a --proxy $PROXY"
+  [ -n "$COOKIES_BROWSER" ] && a="$a --cookies-from-browser $COOKIES_BROWSER"
+  printf '%s' "$a"
+}
+
+# Politeness flags: sleep with jitter between requests, optional rate cap.
+throttle_args() {
+  local a=""
+  if [ "$SLEEP_REQ" != "0" ]; then
+    a="--sleep-requests $SLEEP_REQ --sleep-interval $SLEEP_REQ"
+    a="$a --max-sleep-interval $(awk -v s="$SLEEP_REQ" 'BEGIN{printf "%.0f", s*2+1}')"
+  fi
+  [ -n "$RATE" ] && a="$a --limit-rate $RATE"
+  printf '%s' "$a"
+}
+
+NET_ARGS="$(net_args)"
+THROTTLE_ARGS="$(throttle_args)"
+CURL_PROXY=""
+[ -n "$PROXY" ] && CURL_PROXY="--proxy $PROXY"
 
 mkdir -p "$OUTDIR" || die "cannot write to $OUTDIR"
 
-# All scratch space lives under one root, cleaned up even on Ctrl-C or kill.
 TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/spotify-dl.XXXXXX")"
 trap 'rm -rf "$TMPROOT"' EXIT HUP INT TERM
 
 # ---------------------------------------------------------------- spotify side
 
-# Normalise a link or URI into "<type>/<id>" for track, album or playlist.
 parse_spotify() {
   local in="$1" kind id
   in="${in%%\?*}"
@@ -100,9 +179,8 @@ parse_spotify() {
   printf '%s/%s\n' "$kind" "$id"
 }
 
-# The embed page carries the full track list as JSON — no API key, no login.
 fetch_entity() {
-  curl -fsL -A "$UA" "https://open.spotify.com/embed/$1" |
+  curl -fsL $CURL_PROXY -A "$UA" "https://open.spotify.com/embed/$1" |
     sed -n 's/.*id="__NEXT_DATA__" type="application\/json">\(.*\)<\/script>.*/\1/p'
 }
 
@@ -113,13 +191,10 @@ sanitize() {
     sed 's/  */ /g; s/^[ .]*//; s/ *$//'
 }
 
-# Best YouTube match for a track: closest duration wins, official "- Topic"
-# uploads and "official audio" get a bonus, live/cover/karaoke/sped-up versions
-# are penalised unless the Spotify title itself asks for that kind of version.
 # Score one search query's results and return the winning video id, or nothing.
 search_best() {
   local query="$1" want_ms="$2" allow_live="$3" allow_remix="$4"
-  yt-dlp $COOKIE_ARGS --ignore-config --flat-playlist --dump-json \
+  yt-dlp $NET_ARGS $THROTTLE_ARGS --ignore-config --flat-playlist --dump-json \
          "ytsearch${CANDIDATES}:${query}" 2>/dev/null |
   jq -rs --argjson want "${want_ms:-0}" --argjson allow_live "$allow_live" \
          --argjson allow_remix "$allow_remix" '
@@ -159,8 +234,6 @@ pick_video() {
   printf '%s' "$vid"
 }
 
-# Record the outcome of one track for the closing summary. A single short
-# append is atomic enough for parallel workers.
 note_result() {
   [ -n "${SDL_RESULTS:-}" ] || return 0
   printf '%s\t%s\n' "$1" "$2" >> "$SDL_RESULTS" 2>/dev/null || true
@@ -183,6 +256,14 @@ download_track() {
     return 0
   fi
 
+  # Re-checked per track: if the tunnel drops mid-batch, stop rather than
+  # silently continuing over the bare connection.
+  if [ "$REQUIRE_VPN" -eq 1 ] && ! tunnel_active; then
+    log "  ! no VPN (default route via $(route_iface)) — skipped $base"
+    note_result FAIL "$base (no VPN)"
+    return 1
+  fi
+
   vid="$(pick_video "$title" "$artist" "$dur_ms")"
   if [ -z "${vid:-}" ]; then
     log "  ! no YouTube match: $base"
@@ -192,12 +273,10 @@ download_track() {
 
   tmp="$(mktemp -d "$TMPROOT/track.XXXXXX")" || return 1
 
-  # Progress bars from several workers at once are unreadable, so they are only
-  # shown when downloading one track at a time.
   local prog="--no-progress"
   [ "$JOBS" -eq 1 ] && prog="--progress"
 
-  yt-dlp $COOKIE_ARGS --ignore-config --no-playlist --no-warnings --quiet $prog \
+  yt-dlp $NET_ARGS $THROTTLE_ARGS --ignore-config --no-playlist --no-warnings --quiet $prog \
       -f "bestaudio/best" -x --audio-format mp3 --audio-quality 0 \
       --write-thumbnail --convert-thumbnails jpg \
       -o "$tmp/audio.%(ext)s" "https://www.youtube.com/watch?v=$vid"
@@ -209,9 +288,8 @@ download_track() {
     return 1
   fi
 
-  # Cover art: Spotify's own, falling back to the YouTube thumbnail.
   thumb=""
-  if [ -n "$cover" ] && curl -fsL -A "$UA" "$cover" -o "$tmp/cover.jpg" && [ -s "$tmp/cover.jpg" ]; then
+  if [ -n "$cover" ] && curl -fsL $CURL_PROXY -A "$UA" "$cover" -o "$tmp/cover.jpg" && [ -s "$tmp/cover.jpg" ]; then
     thumb="$tmp/cover.jpg"
   elif [ -s "$tmp/audio.jpg" ]; then
     thumb="$tmp/audio.jpg"
@@ -235,7 +313,7 @@ download_track() {
     log "  OK $base"
     note_result OK "$base"
   else
-    mv -f "$tmp/audio.mp3" "$out"   # keep the audio even if tagging failed
+    mv -f "$tmp/audio.mp3" "$out"
     log "  OK $base (untagged — ffmpeg tagging failed)"
     note_result OK "$base (untagged)"
   fi
@@ -256,6 +334,23 @@ fi
 
 # --------------------------------------------------------------------- driver
 
+if [ "$DRYRUN" -eq 0 ] && [ "$REQUIRE_VPN" -eq 1 ] && ! tunnel_active; then
+  log "No VPN: the default route leaves through $(route_iface)."
+  vpn_hint
+  exit 2
+fi
+
+if [ "$DRYRUN" -eq 0 ]; then
+  ip="$(egress_ip)"
+  if [ -n "$PROXY" ]; then
+    log "proxy: $PROXY${ip:+ — traffic appears from $ip}"
+  elif [ "$REQUIRE_VPN" -eq 1 ]; then
+    log "tunnel: $(route_iface)${ip:+ — traffic appears from $ip}"
+  else
+    log "no VPN${ip:+ — traffic appears from $ip (your own address)}"
+  fi
+fi
+
 RESULTS="$TMPROOT/results"
 : > "$RESULTS"
 export SDL_RESULTS="$RESULTS"
@@ -264,6 +359,10 @@ export SDL_CANDIDATES="$CANDIDATES"
 export SDL_COOKIES="$COOKIES_BROWSER"
 export SDL_FORCE="$FORCE"
 export SDL_JOBS="$JOBS"
+export SDL_SLEEP="$SLEEP_REQ"
+export SDL_RATE="$RATE"
+export SDL_PROXY="$PROXY"
+export SDL_REQUIRE_VPN="$REQUIRE_VPN"
 
 for link in "$@"; do
   ref="$(parse_spotify "$link")"
@@ -284,14 +383,11 @@ for link in "$@"; do
   cover="$(printf '%s' "$json" | jq -r '
     (.props.pageProps.state.data.entity.visualIdentity.image // [])
     | sort_by(.maxWidth) | last | .url // empty')"
-  # A playlist's artwork is not any track's artwork.
   [ "$kind" = "playlist" ] && cover=""
 
   album_name=""
   [ "$kind" = "album" ] && album_name="$name"
 
-  # One tab-separated row per track: title, artist(s), duration (ms), uri.
-  # No empty columns — `read` with a tab IFS collapses them and shifts fields.
   rows="$(printf '%s' "$json" | jq -r '
     .props.pageProps.state.data.entity as $e
     | (if $e.type == "track"
@@ -329,7 +425,6 @@ for link in "$@"; do
   export SDL_COVER="$cover"
 
   if [ "$JOBS" -gt 1 ] && [ "$DRYRUN" -eq 0 ]; then
-    # One worker process per track, $JOBS running at once.
     printf '%s' "$rows" | tr '\n' '\0' |
       xargs -0 -n 1 -P "$JOBS" "$SELF" --track-record
   else
@@ -354,6 +449,9 @@ if [ "$DRYRUN" -eq 0 ]; then
   if [ "${n_fail:-0}" -gt 0 ]; then
     log "failed:"
     grep '^FAIL' "$RESULTS" | cut -f2- | sed 's/^/  - /' >&2
+  fi
+  if grep -q 'no VPN' "$RESULTS" 2>/dev/null; then
+    log "The tunnel dropped during the run — reconnect and run the same command to finish."
   fi
 else
   log ""

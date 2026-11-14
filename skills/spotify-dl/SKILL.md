@@ -28,6 +28,10 @@ spotify-dl [options] <spotify-url|spotify:uri> [more links...]
 -o DIR       output directory (default: ~/Music/spotify-dl, or $SPOTIFY_DL_DIR)
 -j N         tracks to download in parallel (default: 4, 1 = one at a time)
 -n N         YouTube candidates to weigh per track (default: 5)
+-S SECS      sleep between requests, with jitter (default: 0)
+-L RATE      cap download speed, e.g. 2M
+-x PROXY     send traffic through a proxy, e.g. socks5://127.0.0.1:1080
+--no-vpn     download over the plain connection (do not pass this yourself)
 -C BROWSER   take cookies from a browser (chrome, safari, firefox...)
 -f           re-download even if the MP3 already exists
 -d           dry run: list what it would fetch, download nothing
@@ -49,6 +53,35 @@ A parallel run prints one line per finished track and ends with a summary
 (downloaded / already had / failed, with each failure named). Completed files
 are skipped on a re-run, so an interrupted or cancelled batch resumes where it
 stopped — just run the same command again.
+## VPN is required by default
+
+The script refuses to download unless the default route leaves through a
+tunnel (`utun*`, `ipsec*`, `ppp*`, `tun*`, `gpd*`), or `-x` names a proxy. It
+exits 2 with a list of the VPN profiles configured on the machine.
+
+**Do not pass `--no-vpn` to work around this.** If the guard trips, tell the
+user their VPN is disconnected and let them decide: connect it and re-run, or
+explicitly ask for `--no-vpn`. The script cannot establish a connection itself,
+because a VPN client's credentials live in its own app; `scutil --nc start
+"<name>"` works only for profiles macOS can bring up unaided, and silently
+falls back to Disconnected otherwise.
+
+Each track re-checks, so a tunnel that drops mid-batch stops the remaining
+tracks rather than leaking the user's own IP. The summary says so, and a re-run
+finishes the rest.
+
+`-d` (dry run) only reads Spotify metadata, so it works with no tunnel.
+
+## Rate limiting
+
+If downloads start failing with "Sign in to confirm you're not a bot", the IP is
+being rate-limited. In order: lower `-j`, add `-S 2` (sleeps with jitter), cap
+with `-L 2M`, or switch VPN endpoint. It usually clears on its own.
+
+Reach for `-C <browser>` last and say why: it sends the user's logged-in
+cookies, which attaches automated downloading to their account rather than just
+an IP, and an account can be actioned where an IP is only throttled. Never pass
+it without the user asking.
 
 ## How to run it
 

@@ -47,6 +47,10 @@ spotify-dl -f <link>              # re-download over existing files
 | `-o DIR` | output directory (default `~/Music/spotify-dl`, or `$SPOTIFY_DL_DIR`) |
 | `-j N` | tracks to download in parallel (default 4, `1` = one at a time) |
 | `-n N` | YouTube candidates to weigh per track (default 5) |
+| `-S SECS` | sleep between requests, with jitter (default 0) |
+| `-L RATE` | cap download speed, e.g. `2M` |
+| `-x PROXY` | send traffic through a proxy, e.g. `socks5://127.0.0.1:1080` |
+| `--no-vpn` | download over the plain connection (see below) |
 | `-C BROWSER` | pass cookies from `chrome`, `safari`, `firefox`, ... to yt-dlp |
 | `-f` | re-download even if the MP3 exists |
 | `-d` | dry run |
@@ -73,6 +77,58 @@ Two things to know:
 A run ends with a summary of how many tracks were downloaded, already present,
 and failed, naming each failure. Finished files are skipped on a re-run, so an
 interrupted batch resumes where it stopped.
+
+## VPN
+
+By default **nothing is downloaded unless traffic leaves through a tunnel**.
+The check is the interface of the default route: `utun*`, `ipsec*`, `ppp*`,
+`tun*` and `gpd*` count as a tunnel, anything else (`en0`, `bridge0`) does not.
+Naming a proxy with `-x` also satisfies it, since that traffic egresses there.
+
+Without one, the run stops before any request is made and prints the VPN
+profiles configured on the machine:
+
+```
+No VPN: the default route leaves through en0.
+  Connect one and re-run, or pass --no-vpn to accept your own IP.
+  Configured here:
+    - ProtonVPN
+```
+
+Every track re-checks, so if the tunnel drops mid-batch the remaining tracks
+stop instead of quietly falling back to your own address — a kill switch rather
+than a one-time check at startup. Reconnect and run the same command to finish;
+completed files are skipped.
+
+The script cannot *establish* a connection — a VPN client's credentials live in
+its own app. Connect there (or `scutil --nc start "<name>"` for a profile macOS
+can bring up unaided), then run the download. `--no-vpn` opts out entirely.
+
+`-d` (dry run) reads only Spotify metadata, so it works without a tunnel.
+
+## Being polite to YouTube
+
+Nothing here hides that you are a script, so the way to avoid trouble is to
+look unremarkable:
+
+- `-S SECS` sleeps between requests, randomised between `SECS` and `2×SECS+1`
+  so the gaps aren't a fixed heartbeat. `-S 2` is a good default for a long
+  playlist.
+- `-L RATE` caps download speed (`-L 2M`), which keeps a big batch from
+  saturating the link.
+- A lower `-j` matters more than either. Volume and burstiness are what get
+  noticed, not concurrency as such.
+
+Hitting "Sign in to confirm you're not a bot" means the IP is being
+rate-limited; it normally clears by itself. Prefer waiting, a lower `-j`, or a
+different VPN endpoint over `-C`.
+
+### A warning about `-C`
+
+`-C <browser>` clears a bot check by sending that browser's cookies, which ties
+automated downloading to your **logged-in account** instead of just an IP.
+That is a different and larger risk: an IP gets throttled for a while, an
+account can be actioned. Treat it as a last resort, not a default.
 
 ## How a match is picked
 
