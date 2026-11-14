@@ -364,6 +364,30 @@ if [ "$DRYRUN" -eq 0 ]; then
   fi
 fi
 
+# A browser's cookie store is encrypted with the macOS login keychain, so every
+# process that reads it raises a password prompt — once per track, since each
+# track runs in its own worker. Export once here instead and hand the workers a
+# plain cookies.txt, so the user is asked at most once per run.
+if [ -n "$COOKIES_BROWSER" ] && [ "$DRYRUN" -eq 0 ]; then
+  COOKIE_JAR="$TMPROOT/cookies.txt"
+  log "exporting cookies from $COOKIES_BROWSER — macOS may ask for your login"
+  log "password once; it is not asked again during this run."
+  # Exit status is not the signal: a no-op target makes yt-dlp exit non-zero
+  # while still writing the jar, so check for actual cookie lines instead.
+  yt-dlp --ignore-config --quiet --no-warnings --skip-download \
+         --cookies-from-browser "$COOKIES_BROWSER" --cookies "$COOKIE_JAR" \
+         "ytsearch0:a" >/dev/null 2>&1
+  if [ -s "$COOKIE_JAR" ] && [ "$(grep -v -e '^#' -e '^$' "$COOKIE_JAR" 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]; then
+    COOKIES_FILE="$COOKIE_JAR"
+    log "  exported — no further prompts this run"
+  else
+    log "  could not read cookies from $COOKIES_BROWSER; continuing without them"
+  fi
+  # Either way the workers never touch the browser store themselves.
+  COOKIES_BROWSER=""
+  NET_ARGS="$(net_args)"
+fi
+
 RESULTS="$TMPROOT/results"
 : > "$RESULTS"
 export SDL_RESULTS="$RESULTS"

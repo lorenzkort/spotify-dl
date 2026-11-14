@@ -101,6 +101,13 @@ If the user explicitly asks for cookies, warn about the prompt first, and
 prefer `-k FILE` with an exported cookies.txt (one prompt when exporting,
 none afterwards) over `-C`.
 
+The script defends itself here too: if `-C` is passed anyway, the driver
+exports the cookies **once** into a temporary `cookies.txt` and hands the
+workers that file, so the keychain is read a single time instead of once per
+track. A prompt appearing for every song means an older version is installed —
+update it. If the export fails, the run says so and continues without cookies
+rather than stalling.
+
 ## Invoke it by full path
 
 `spotify-dl` is often not on `PATH` in a fresh shell, which shows up as
