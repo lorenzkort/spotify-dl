@@ -1,0 +1,13 @@
+{
+  "name": "spotify-dl",
+  "version": "1.0.0",
+  "description": "Save a Spotify track, album, or playlist as tagged MP3 files by matching each track on YouTube.",
+  "author": {
+    "name": "lorenzkort",
+    "url": "https://github.com/lorenzkort"
+  },
+  "repository": "https://github.com/lorenzkort/spotify-dl",
+  "license": "MIT",
+  "keywords": ["spotify", "youtube", "yt-dlp", "mp3", "music", "ffmpeg", "download"],
+  "skills": ["./skills/spotify-dl"]
+}

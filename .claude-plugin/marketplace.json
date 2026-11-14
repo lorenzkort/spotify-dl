@@ -1,0 +1,17 @@
+{
+  "name": "spotify-dl",
+  "owner": {
+    "name": "lorenzkort",
+    "url": "https://github.com/lorenzkort"
+  },
+  "description": "Spotify link to tagged MP3, via YouTube.",
+  "plugins": [
+    {
+      "name": "spotify-dl",
+      "source": "./",
+      "description": "Save a Spotify track, album, or playlist as tagged MP3 files by matching each track on YouTube.",
+      "category": "productivity",
+      "keywords": ["spotify", "youtube", "yt-dlp", "mp3", "music", "download"]
+    }
+  ]
+}
