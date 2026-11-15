@@ -479,7 +479,17 @@ export SDL_RATE="$RATE"
 export SDL_PROXY="$PROXY"
 export SDL_REQUIRE_VPN="$REQUIRE_VPN"
 
+# Metadata for every link is collected before the first download, which is
+# silent and slow for a long list of single-track links — so say how far along
+# it is. A handful of links needs no counter.
+link_total=$#
+link_i=0
+
 for link in "$@"; do
+  link_i=$((link_i + 1))
+  if [ "$link_total" -gt 25 ] && [ $(( (link_i - 1) % 25 )) -eq 0 ]; then
+    log "reading Spotify metadata — $link_i/$link_total"
+  fi
   ref="$(parse_spotify "$link")"
   if [ -z "$ref" ]; then
     log "not a Spotify track/album/playlist link, skipping: $link"
