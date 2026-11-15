@@ -10,6 +10,7 @@
 #
 # Options:
 #   -o DIR        output directory (default: ~/Music/spotify-dl)
+#   -F FILE       read Spotify links from a file, one per line
 #   -j N          tracks to download in parallel (default: 4, 1 = one at a time)
 #   -n N          YouTube candidates to weigh per track (default: 5)
 #   -S SECS       sleep between requests, with jitter (default: 0)
@@ -50,6 +51,7 @@ RATE="${SDL_RATE:-}"
 PROXY="${SDL_PROXY:-}"
 REQUIRE_VPN="${SDL_REQUIRE_VPN:-0}"
 DRYRUN=0
+LINKFILE=""
 
 usage() { sed -n '/^# Usage:/,/^# Requires:/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "error: $*" >&2; exit 1; }
@@ -78,7 +80,7 @@ done
 set -- ${ARGV+"${ARGV[@]}"}
 
 if [ "$CHILD" -eq 0 ]; then
-  while getopts ":o:j:n:S:L:x:C:k:fdh" opt; do
+  while getopts ":o:j:n:S:L:x:C:k:F:fdh" opt; do
     case "$opt" in
       o) OUTDIR="$OPTARG" ;;
       j) JOBS="$OPTARG" ;;
@@ -88,6 +90,7 @@ if [ "$CHILD" -eq 0 ]; then
       x) PROXY="$OPTARG" ;;
       C) COOKIES_BROWSER="$OPTARG" ;;
       k) COOKIES_FILE="$OPTARG" ;;
+      F) LINKFILE="$OPTARG" ;;
       f) FORCE=1 ;;
       d) DRYRUN=1 ;;
       h) usage 0 ;;
@@ -95,6 +98,17 @@ if [ "$CHILD" -eq 0 ]; then
     esac
   done
   shift $((OPTIND - 1))
+
+  # -F: one link per line. Blank lines and # comments are ignored, so a list
+  # pasted straight out of the Spotify app can be used as-is.
+  if [ -n "$LINKFILE" ]; then
+    [ -f "$LINKFILE" ] || die "no such file: $LINKFILE"
+    while IFS= read -r fileline || [ -n "$fileline" ]; do
+      fileline="$(printf '%s' "$fileline" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      case "$fileline" in ''|'#'*) continue ;; esac
+      set -- "$@" "$fileline"
+    done < "$LINKFILE"
+  fi
   [ $# -ge 1 ] || usage 1
 fi
 
@@ -392,12 +406,13 @@ download_track() {
 # ------------------------------------------------- worker: one track, one call
 
 if [ "$CHILD" -eq 1 ]; then
-  IFS=$'\t' read -r w_title w_artist w_dur w_uri <<WORKER
+  IFS=$'\t' read -r w_title w_artist w_album w_cover w_dur w_uri <<WORKER
 $RECORD
 WORKER
   [ -n "${w_title:-}" ] || exit 0
-  download_track "$w_title" "$w_artist" "${SDL_ALBUM:-$w_title}" \
-                 "${w_dur:-0}" "${w_uri:-}" "${SDL_COVER:-}"
+  [ "${w_cover:-}" = "none" ] && w_cover=""
+  download_track "$w_title" "$w_artist" "${w_album:-$w_title}" \
+                 "${w_dur:-0}" "${w_uri:-}" "${w_cover:-}"
   exit $?
 fi
 
@@ -449,6 +464,8 @@ if [ -n "$COOKIES_BROWSER" ] && [ "$DRYRUN" -eq 0 ]; then
 fi
 
 RESULTS="$TMPROOT/results"
+ALL_ROWS="$TMPROOT/all_rows"
+: > "$ALL_ROWS"
 : > "$RESULTS"
 export SDL_RESULTS="$RESULTS"
 export SPOTIFY_DL_DIR="$OUTDIR"
@@ -535,28 +552,46 @@ for link in "$@"; do
   fi
 
   count="$(printf '%s\n' "$rows" | grep -c .)"
-  if [ "$JOBS" -gt 1 ] && [ "$DRYRUN" -eq 0 ]; then
-    log "$kind: ${name:-unknown} — $count tracks, $JOBS at a time"
-  else
-    log "$kind: ${name:-unknown} — $count tracks"
-  fi
+  # A long list of individual track links would otherwise print a header line
+  # per link; only collections are worth announcing.
+  [ "$kind" != "track" ] && log "$kind: ${name:-unknown} — $count tracks"
 
-  export SDL_ALBUM="$album_name"
-  export SDL_COVER="$cover"
-
-  if [ "$JOBS" -gt 1 ] && [ "$DRYRUN" -eq 0 ]; then
-    printf '%s' "$rows" | tr '\n' '\0' |
-      xargs -0 -n 1 -P "$JOBS" "$SELF" --track-record
-  else
-    while IFS=$'\t' read -r t a d u; do
-      [ -n "${t:-}" ] || continue
-      log "- $a - $t"
-      download_track "$t" "$a" "${album_name:-$t}" "${d:-0}" "${u:-}" "$cover"
-    done <<ROWS
-$rows
-ROWS
-  fi
+  # Normalise to six columns (title, artist, album, cover, duration, uri) so
+  # each track carries its own album and artwork, and the whole run can be
+  # dispatched as one batch. Dispatching per link would mean a list of
+  # single-track links downloads one at a time, with no parallelism at all.
+  printf '%s\n' "$rows" |
+    awk -v al="$album_name" -v cv="$cover" 'BEGIN{FS=OFS="\t"}
+      NF>=4 && $1 != "" {
+        a = (al == "" ? $1 : al);
+        c = (cv == "" ? "none" : cv);
+        print $1, $2, a, c, $3, $4
+      }' >> "$ALL_ROWS"
 done
+
+# The same track can appear in several of the given links; keep the first.
+if [ -s "$ALL_ROWS" ]; then
+  awk -F'\t' '!seen[$6]++' "$ALL_ROWS" > "$ALL_ROWS.dedup" &&
+    mv -f "$ALL_ROWS.dedup" "$ALL_ROWS"
+fi
+
+total="$(grep -c . "$ALL_ROWS" 2>/dev/null)"
+[ -n "${total:-}" ] || total=0
+
+if [ "$total" -eq 0 ]; then
+  log "nothing to download"
+elif [ "$JOBS" -gt 1 ] && [ "$DRYRUN" -eq 0 ]; then
+  log ""
+  log "$total tracks, $JOBS at a time"
+  tr '\n' '\0' < "$ALL_ROWS" | xargs -0 -n 1 -P "$JOBS" "$SELF" --track-record
+else
+  while IFS=$'\t' read -r t a al cv d u; do
+    [ -n "${t:-}" ] || continue
+    [ "$cv" = "none" ] && cv=""
+    log "- $a - $t"
+    download_track "$t" "$a" "${al:-$t}" "${d:-0}" "${u:-}" "$cv"
+  done < "$ALL_ROWS"
+fi
 
 # ------------------------------------------------------------------- summary
 
