@@ -129,6 +129,28 @@ or `~/bin/spotify-dl` if the user symlinked it there.
    `ffprobe -hide_banner <file>.mp3` shows the embedded cover art stream and
    the ID3 tags.
 
+## Playlists longer than 100 tracks
+
+The embed page the script reads by default returns only the first 100 tracks,
+reports no total, and ignores offset/limit/page. A 444-track playlist therefore
+downloads as 100 unless Web API credentials are configured.
+
+The script prints a NOTE whenever a list comes back exactly 100 long. **Do not
+ignore it and do not report the run as complete** — tell the user their
+playlist is probably longer than what was fetched, and that fetching the rest
+needs a free app from developer.spotify.com (Client ID + Secret) saved to
+`~/.config/spotify-dl/credentials` or exported as `SPOTIFY_CLIENT_ID` /
+`SPOTIFY_CLIENT_SECRET`.
+
+You cannot create that app for them: it requires logging into their Spotify
+account. Ask, then re-run the same command — already-downloaded files are
+skipped, so only the missing tracks are fetched.
+
+With credentials present the script pages the full list automatically via the
+client-credentials flow, which covers public playlists and albums. A private
+playlist returns nothing from the API, and the script falls back to the embed
+and says so.
+
 ## How the matching works
 
 For each track the script searches YouTube and scores candidates: closest

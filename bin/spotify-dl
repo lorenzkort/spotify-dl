@@ -193,6 +193,66 @@ fetch_entity() {
     sed -n 's/.*id="__NEXT_DATA__" type="application\/json">\(.*\)<\/script>.*/\1/p'
 }
 
+# The embed page returns at most the first 100 tracks and carries no total, so
+# anything longer needs the Web API. Credentials come from the environment or
+# ~/.config/spotify-dl/credentials (SPOTIFY_CLIENT_ID=..., SPOTIFY_CLIENT_SECRET=...),
+# from a free app at developer.spotify.com. Without them the embed is used and
+# a long playlist is silently truncated — so the truncation is reported.
+load_credentials() {
+  local f="$HOME/.config/spotify-dl/credentials"
+  if [ -z "${SPOTIFY_CLIENT_ID:-}" ] && [ -f "$f" ]; then
+    . "$f" 2>/dev/null || true
+  fi
+  [ -n "${SPOTIFY_CLIENT_ID:-}" ] && [ -n "${SPOTIFY_CLIENT_SECRET:-}" ]
+}
+
+# Client-credentials token: reads public catalogue data, no user login.
+spotify_token() {
+  local basic
+  basic="$(printf '%s:%s' "$SPOTIFY_CLIENT_ID" "$SPOTIFY_CLIENT_SECRET" | base64 | tr -d '\n')"
+  curl -fsS $CURL_PROXY -X POST "https://accounts.spotify.com/api/token" \
+       -H "Authorization: Basic $basic" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "grant_type=client_credentials" 2>/dev/null |
+    jq -r '.access_token // empty'
+}
+
+# Page through every track of a playlist or album, printing the same
+# tab-separated rows the embed path produces. Empty output means "fall back".
+api_rows() {
+  local kind="$1" id="$2" token="$3" offset=0 limit=100 url page n total=0
+  while :; do
+    if [ "$kind" = "playlist" ]; then
+      url="https://api.spotify.com/v1/playlists/$id/tracks?limit=$limit&offset=$offset"
+    else
+      url="https://api.spotify.com/v1/albums/$id/tracks?limit=50&offset=$offset"
+    fi
+    page="$(curl -fsS $CURL_PROXY -H "Authorization: Bearer $token" "$url" 2>/dev/null)"
+    [ -n "$page" ] || return 1
+    n="$(printf '%s' "$page" | jq '(.items // []) | length' 2>/dev/null)"
+    [ -n "$n" ] || return 1
+    total="$(printf '%s' "$page" | jq -r '.total // 0' 2>/dev/null)"
+    if [ "$kind" = "playlist" ]; then
+      printf '%s' "$page" | jq -r '
+        (.items // [])[] | .track | select(. != null) | select(.name != null)
+        | [ .name,
+            (([.artists[]?.name] | join(", ")) | if . == "" then "Unknown Artist" else . end),
+            ((.duration_ms // 0) | tostring),
+            (.uri // "") ] | @tsv'
+    else
+      printf '%s' "$page" | jq -r '
+        (.items // [])[] | select(.name != null)
+        | [ .name,
+            (([.artists[]?.name] | join(", ")) | if . == "" then "Unknown Artist" else . end),
+            ((.duration_ms // 0) | tostring),
+            (.uri // "") ] | @tsv'
+    fi
+    [ "$n" -eq 0 ] && break
+    offset=$((offset + n))
+    [ "$offset" -ge "${total:-0}" ] && break
+  done
+}
+
 # ---------------------------------------------------------------- youtube side
 
 sanitize() {
@@ -426,26 +486,48 @@ for link in "$@"; do
   album_name=""
   [ "$kind" = "album" ] && album_name="$name"
 
-  rows="$(printf '%s' "$json" | jq -r '
-    .props.pageProps.state.data.entity as $e
-    | (if $e.type == "track"
-       then [{ title: $e.name,
-               artist: ([$e.artists[]?.name] | join(", ")),
-               dur: ($e.duration // 0),
-               uri: $e.uri }]
-       else [ $e.trackList[]?
-              | { title: .title,
-                  artist: .subtitle,
-                  dur: (.duration // 0),
-                  uri: .uri } ]
-       end)
-    | .[]
-    | select((.title // "") != "")
-    | [ .title,
-        (if (.artist // "") == "" then "Unknown Artist" else .artist end),
-        ((.dur // 0) | tostring),
-        (.uri // "") ]
-    | @tsv')"
+  # Full track list: the Web API when credentials are available, the embed page
+  # otherwise. The embed stops at 100 tracks and says nothing about it, so a
+  # list that comes back exactly full is flagged as probably truncated.
+  rows=""
+  api_token=""
+  if [ "$kind" != "track" ] && load_credentials; then
+    api_token="$(spotify_token)"
+    if [ -n "$api_token" ]; then
+      rows="$(api_rows "$kind" "${ref##*/}" "$api_token")"
+      [ -n "$rows" ] || log "  Spotify API returned nothing (private playlist?); using the embed page"
+    else
+      log "  Spotify credentials found but the token request failed; using the embed page"
+    fi
+  fi
+
+  if [ -z "$rows" ]; then
+    rows="$(printf '%s' "$json" | jq -r '
+      .props.pageProps.state.data.entity as $e
+      | (if $e.type == "track"
+         then [{ title: $e.name,
+                 artist: ([$e.artists[]?.name] | join(", ")),
+                 dur: ($e.duration // 0),
+                 uri: $e.uri }]
+         else [ $e.trackList[]?
+                | { title: .title,
+                    artist: .subtitle,
+                    dur: (.duration // 0),
+                    uri: .uri } ]
+         end)
+      | .[]
+      | select((.title // "") != "")
+      | [ .title,
+          (if (.artist // "") == "" then "Unknown Artist" else .artist end),
+          ((.dur // 0) | tostring),
+          (.uri // "") ]
+      | @tsv')"
+    if [ "$kind" != "track" ] && [ "$(printf '%s\n' "$rows" | grep -c .)" -ge 100 ]; then
+      log "  NOTE: the embed page caps at 100 tracks and this list is full, so there"
+      log "  are probably more. Set SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET (or"
+      log "  ~/.config/spotify-dl/credentials) to fetch the whole thing."
+    fi
+  fi
 
   if [ -z "$rows" ]; then
     log "no tracks found for $ref"

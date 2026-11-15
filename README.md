@@ -124,6 +124,36 @@ automated downloading to your **logged-in account** instead of just an IP.
 That is a different and larger risk: an IP gets throttled for a while, an
 account can be actioned. Treat it as a last resort, not a default.
 
+## Playlists longer than 100 tracks
+
+The embed page returns **at most the first 100 tracks**, carries no total, and
+ignores `offset`, `limit` and `page` entirely — so a 444-track playlist looks
+like a 100-track one. When a list comes back exactly full, the run says so
+instead of quietly truncating.
+
+To fetch the whole thing, give it Web API credentials:
+
+1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard),
+   create an app (any name; redirect URI is unused), and copy the Client ID and
+   Client Secret.
+2. Put them somewhere the script can read:
+
+```bash
+mkdir -p ~/.config/spotify-dl
+cat > ~/.config/spotify-dl/credentials <<'CREDS'
+SPOTIFY_CLIENT_ID=your_client_id
+SPOTIFY_CLIENT_SECRET=your_client_secret
+CREDS
+chmod 600 ~/.config/spotify-dl/credentials
+```
+
+Or export `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in your shell.
+
+With credentials present the script pages through the full track list (100 at a
+time) using the client-credentials flow, which reads public catalogue data and
+needs no user login — so it works for public playlists and albums, not private
+ones. Without them, nothing changes: the embed is used and the cap is reported.
+
 ## How a match is picked
 
 For each track, the top N YouTube search results are scored:
