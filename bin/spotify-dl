@@ -17,6 +17,9 @@
 #   -L RATE       cap download speed, e.g. 2M (default: no cap)
 #   -x PROXY      send all traffic through a proxy, e.g. socks5://127.0.0.1:1080
 #   -k FILE       cookies.txt file (no keychain prompt, unlike -C)
+#   -P FILE       pin file: "<spotify-track-id> <youtube-id>" per line, for
+#                 tracks YouTube search cannot reach (default:
+#                 ~/.config/spotify-dl/pins)
 #   -C BROWSER    take cookies from a browser (chrome, safari, firefox...);
 #                 ties the download to that account — see the note below
 #   -f            re-download even if the MP3 already exists
@@ -52,6 +55,7 @@ PROXY="${SDL_PROXY:-}"
 REQUIRE_VPN="${SDL_REQUIRE_VPN:-0}"
 DRYRUN=0
 LINKFILE=""
+PINS_FILE="${SDL_PINS:-$HOME/.config/spotify-dl/pins}"
 
 usage() { sed -n '/^# Usage:/,/^# Requires:/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "error: $*" >&2; exit 1; }
@@ -80,7 +84,7 @@ done
 set -- ${ARGV+"${ARGV[@]}"}
 
 if [ "$CHILD" -eq 0 ]; then
-  while getopts ":o:j:n:S:L:x:C:k:F:fdh" opt; do
+  while getopts ":o:j:n:S:L:x:C:k:F:P:fdh" opt; do
     case "$opt" in
       o) OUTDIR="$OPTARG" ;;
       j) JOBS="$OPTARG" ;;
@@ -91,6 +95,7 @@ if [ "$CHILD" -eq 0 ]; then
       C) COOKIES_BROWSER="$OPTARG" ;;
       k) COOKIES_FILE="$OPTARG" ;;
       F) LINKFILE="$OPTARG" ;;
+      P) PINS_FILE="$OPTARG" ;;
       f) FORCE=1 ;;
       d) DRYRUN=1 ;;
       h) usage 0 ;;
@@ -275,18 +280,27 @@ sanitize() {
 }
 
 # Score one search query's results and return the winning video id, or nothing.
+# max_drift, when non-zero, throws away every candidate whose length is further
+# than that many ms from Spotify's. The scoring below always returns the best of
+# whatever came back, which is fine for a full "artist title" query because the
+# results are already on topic, but a reduced fallback query is broad enough to
+# match something unrelated, so those pass a drift limit and take nothing if no
+# candidate is close enough.
 search_best() {
-  local query="$1" want_ms="$2" allow_live="$3" allow_remix="$4"
+  local query="$1" want_ms="$2" allow_live="$3" allow_remix="$4" max_drift="${5:-0}"
   yt-dlp $NET_ARGS $THROTTLE_ARGS --ignore-config --flat-playlist --dump-json \
          "ytsearch${CANDIDATES}:${query}" 2>/dev/null |
   jq -rs --argjson want "${want_ms:-0}" --argjson allow_live "$allow_live" \
-         --argjson allow_remix "$allow_remix" '
+         --argjson allow_remix "$allow_remix" --argjson drift "${max_drift:-0}" '
     map(select(.id != null) | {
           id,
           t: ((.title // "") | ascii_downcase),
           c: (((.channel // .uploader) // "") | ascii_downcase),
           dur: ((.duration // 0) * 1000)
         })
+    | (if ($drift > 0 and $want > 0)
+       then map(select(.dur > 0 and (((.dur - $want) | fabs) <= $drift)))
+       else . end)
     | map(. + {score: (
           (if (.dur == 0 or $want == 0) then 60000 else ((.dur - $want) | fabs) end)
           + (if (.c | test(" - topic$")) then -20000 else 0 end)
@@ -298,9 +312,28 @@ search_best() {
     | sort_by(.score) | .[0].id // empty'
 }
 
+# YouTube's search endpoint answers a query containing a word its content filter
+# trips on with an empty result set rather than a filtered one, and on some
+# addresses that filter is on without being asked for. The word is often part of
+# the artist's own name: "Psychedelic Porn Crumpets" finds nothing at all, while
+# "Psychedelic Crumpets" finds the band's own channel, which spells itself
+# "Psychedelic Prn Crumpets" to get around the same filter. Dropping whole words
+# that match this list is the only way to reach those tracks. Only exact words go,
+# so a title that merely contains one is left alone, and the reduced query runs
+# under a drift limit so a vaguer query cannot pull in the wrong song.
+SDL_FILTER_WORDS='porn|sex|xxx|nude|naked|striptease|stripper|voyeur|erotic|fetish|boob|tits|slut|whore|escort|orgasm|horny'
+
+strip_filter_words() {
+  printf '%s' "$1" | tr ' ' '\n' |
+    grep -Eiv "^[^[:alnum:]]*($SDL_FILTER_WORDS)[^[:alnum:]]*$" |
+    tr '\n' ' ' | sed -E 's/^ +//; s/ +$//'
+}
+
+word_count() { printf '%s' "$1" | wc -w | tr -d ' '; }
+
 pick_video() {
   local title="$1" artist="$2" want_ms="$3" allow_live=0 allow_remix=0
-  local title_lc vid
+  local title_lc vid lead short q
   title_lc="$(printf '%s' "$title" | tr 'A-Z' 'a-z')"
   case "$title_lc" in *live*) allow_live=1 ;; esac
   case "$title_lc" in *remix*|*mix*|*version*|*edit*) allow_remix=1 ;; esac
@@ -314,12 +347,57 @@ pick_video() {
     vid="$(search_best "$title $artist audio" "$want_ms" "$allow_live" "$allow_remix")"
   fi
 
+  # Every featured artist listed twice — once in the artist list, once in a
+  # "(feat. ...)" suffix — makes the query long enough to match nothing.
+  # The lead artist and the bare title still find it.
+  if [ -z "$vid" ]; then
+    lead="${artist%%,*}"
+    short="$(printf '%s' "$title" | sed -E 's/[[:space:]]*[([][^])]*([Ff][Ee][Aa][Tt]|[Ff][Tt]\.|[Ww][Ii][Tt][Hh])[^])]*[])]//g')"
+    q="$lead $short"
+    if [ "$q" != "$artist $title" ]; then
+      vid="$(search_best "$q" "$want_ms" "$allow_live" "$allow_remix" 7000)"
+    fi
+  fi
+
+  # Last resort: drop the words the content filter rejects the query over.
+  if [ -z "$vid" ]; then
+    q="$(strip_filter_words "$artist $title")"
+    if [ "$q" != "$artist $title" ] && [ "$(word_count "$q")" -ge 2 ]; then
+      vid="$(search_best "$q" "$want_ms" "$allow_live" "$allow_remix" 7000)"
+    fi
+  fi
+
   printf '%s' "$vid"
 }
 
 note_result() {
   [ -n "${SDL_RESULTS:-}" ] || return 0
   printf '%s\t%s\n' "$1" "$2" >> "$SDL_RESULTS" 2>/dev/null || true
+}
+
+# Some tracks cannot be reached by any search: YouTube answers a query holding a
+# word its content filter trips on with nothing at all, and dropping that word
+# can leave nothing specific enough to search on ("carwash - striptease" reduces
+# to "carwash", which matches car-detailing videos). A pin file names the video
+# outright for those, one per line, '#' starting a comment:
+#   <spotify track id or uri>   <youtube video id or url>
+pinned_video() {
+  local uri="$1" id want vid
+  if [ -z "${PINS_FILE:-}" ] || [ ! -f "$PINS_FILE" ]; then
+    return 0
+  fi
+  id="${uri##*:}"
+  [ -n "$id" ] || return 0
+  while read -r want vid _; do
+    case "$want" in ''|'#'*) continue ;; esac
+    [ "${want##*:}" = "$id" ] || continue
+    [ -n "$vid" ] || continue
+    vid="${vid##*v=}"
+    vid="${vid##*/}"
+    printf '%s' "$vid"
+    return 0
+  done < "$PINS_FILE"
+  return 0
 }
 
 download_track() {
@@ -347,7 +425,12 @@ download_track() {
     return 1
   fi
 
-  vid="$(pick_video "$title" "$artist" "$dur_ms")"
+  vid="$(pinned_video "$uri")"
+  if [ -n "${vid:-}" ]; then
+    log "  . pinned: $base -> youtu.be/$vid"
+  else
+    vid="$(pick_video "$title" "$artist" "$dur_ms")"
+  fi
   if [ -z "${vid:-}" ]; then
     log "  ! no YouTube match: $base"
     note_result FAIL "$base (no match)"
@@ -478,6 +561,7 @@ export SDL_SLEEP="$SLEEP_REQ"
 export SDL_RATE="$RATE"
 export SDL_PROXY="$PROXY"
 export SDL_REQUIRE_VPN="$REQUIRE_VPN"
+export SDL_PINS="$PINS_FILE"
 
 # Metadata for every link is collected before the first download, which is
 # silent and slow for a long list of single-track links — so say how far along

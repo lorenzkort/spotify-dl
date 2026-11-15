@@ -177,10 +177,44 @@ playlist tracks (a playlist's artwork is not any one track's artwork).
 ## Troubleshooting
 
 - **"Sign in to confirm you're not a bot"** — YouTube is rate-limiting the
-  machine. Re-run with `-C chrome` (or `safari`, `firefox`) so yt-dlp uses the
-  user's browser cookies.
-- **"no YouTube match"** — usually a very obscure or region-blocked track. Try
-  `-n 10`, or fall back to a hand-picked URL.
+  address, not the account. Lower `-j` (2 or 1), raise `-S` (3–5), and let the
+  user know; if they are on a VPN, reconnecting may land on a clean exit IP.
+  Do not reach for `-C` on your own — see "Never pass `-C` on your own" above.
+- **"no YouTube match"** — the search came back empty. Three causes, in order of
+  how often they come up:
+  - YouTube's content filter. A query containing a word the filter trips on
+    returns *nothing at all*, even when the word is part of the artist's name,
+    and on some addresses that filter is on without being asked for. The script
+    retries without those words, which is enough when the word is incidental
+    ("Psychedelic Porn Crumpets" finds nothing, "Psychedelic Crumpets" finds the
+    band's own channel — which spells itself "Psychedelic Prn Crumpets" to get
+    around the same filter). It cannot help when the flagged word *is* the title
+    or the whole artist name, because what is left is too vague to search on.
+  - The track is genuinely not on YouTube. Album tracks by small artists often
+    are not, and have no auto-generated "- Topic" upload either.
+  - A query made long by every featured artist appearing twice. The script
+    retries with the lead artist and the bare title.
+
+  For the first and third causes, find the video by a route that is not a
+  search — list the artist's channel with
+  `yt-dlp --flat-playlist --dump-json "<channel_url>/videos"` and grep the
+  titles — then pin it (below). Confirm a candidate by its length: Spotify's
+  duration for the track is in the embed metadata, and a pin that is more than
+  a second or two off is probably the wrong upload.
+- **Pinning a track by hand** — `-P FILE`, or `~/.config/spotify-dl/pins` by
+  default, maps a Spotify track to a YouTube video, one per line, `#` starting a
+  comment:
+
+  ```
+  17s9ohMleXceK8Qobgl8Zd  MGt8-poMDD0   # carwash - striptease (161s)
+  ```
+
+  Either column accepts a bare id or a full uri/url. A pinned track skips
+  searching and scoring altogether, so verify the video first — nothing checks
+  that it is the right song. The run logs `. pinned:` when a pin is used.
+- **HTTP 429 from Spotify** — too many embed requests from one address. It
+  clears on its own; wait about ten minutes and pace the retry (serial, with a
+  second or two between requests) rather than re-running the same burst.
 - **"could not read Spotify metadata"** — the link is private, region-locked, or
   Spotify changed its embed page. Check that the link opens in a browser; if the
   page loads but the script finds nothing, the `__NEXT_DATA__` extraction in
