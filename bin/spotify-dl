@@ -274,8 +274,24 @@ api_rows() {
 
 # ---------------------------------------------------------------- youtube side
 
+# Spotify's metadata sometimes separates artists with a non-breaking space
+# rather than a plain one, inconsistently enough that the same track can come
+# back both ways. Left as-is, the two spellings sanitize to filenames that look
+# identical but are not, so neither run sees the other's file and the track is
+# downloaded and kept twice. Folding the Unicode spaces into a plain one first
+# makes the name depend on the text, not on which byte Spotify happened to send.
+SDL_NBSP=$(printf '\302\240')      # U+00A0 no-break space
+SDL_NNBSP=$(printf '\342\200\257') # U+202F narrow no-break space
+SDL_THSP=$(printf '\342\200\211')  # U+2009 thin space
+SDL_ZWSP=$(printf '\342\200\213')  # U+200B zero-width space
+
 sanitize() {
-  printf '%s' "$1" | tr '/:\\' '-' | tr -d '\000-\037' |
+  local s="$1"
+  s=${s//"$SDL_NBSP"/ }
+  s=${s//"$SDL_NNBSP"/ }
+  s=${s//"$SDL_THSP"/ }
+  s=${s//"$SDL_ZWSP"/}
+  printf '%s' "$s" | tr '/:\\' '-' | tr -d '\000-\037' |
     sed 's/  */ /g; s/^[ .]*//; s/ *$//'
 }
 
